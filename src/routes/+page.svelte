@@ -11,12 +11,12 @@
   let drawnCard = $state(null); 
   let isLoading = $state(false);
 
-  // --- Derived States (ระบบคำนวณอัตโนมัติ) ---
+  // --- Derived States ---
   let me = $derived(players.find(p => p.name === playerName));
   let isHost = $derived(players.length > 0 && players[0].name === playerName);
   let isMyTurn = $derived(gameState && me && gameState.current_turn_id === me.id);
 
-  // คำนวณแต้มเกม 31 (รวมเฉพาะดอกเดียวกันที่สูงที่สุด)
+  // คำนวณแต้มเกม 31
   let myScore = $derived.by(() => {
     if (!me || !me.hand || me.hand.length === 0) return 0;
     const scores = { '♠': 0, '♥': 0, '♦': 0, '♣': 0 };
@@ -71,6 +71,7 @@
   async function draw(fromDeck = true) {
     if (!isMyTurn || drawnCard) return;
     let source = fromDeck ? [...gameState.draw_pile] : [...gameState.discard_pile];
+    if (source.length === 0) return;
     drawnCard = fromDeck ? source.shift() : source.pop();
     const updateData = fromDeck ? { draw_pile: source } : { discard_pile: source };
     await supabase.from('game_rooms').update(updateData).eq('room_id', roomId);
@@ -88,6 +89,21 @@
       discard_pile: [...gameState.discard_pile, toDiscard],
       current_turn_id: nextP.id
     }).eq('room_id', roomId);
+    drawnCard = null;
+  }
+
+  // --- ฟังก์ชันข้ามเทิร์น ---
+  async function passTurn() {
+    if (!isMyTurn || drawnCard) return; // ข้ามได้เฉพาะตอนยังไม่ได้จั่วไพ่เท่านั้น
+    isLoading = true;
+    const nextIdx = (players.findIndex(p => p.id === me.id) + 1) % players.length;
+    const nextP = players[nextIdx];
+    
+    await supabase.from('game_rooms').update({
+      current_turn_id: nextP.id
+    }).eq('room_id', roomId);
+    
+    isLoading = false;
     drawnCard = null;
   }
 
@@ -141,12 +157,20 @@
             <span>กองจั่ว ({gameState.draw_pile?.length || 0})</span>
             <button class="card-item deck" onclick={() => draw(true)} disabled={!isMyTurn || drawnCard}>?</button>
           </div>
+          
           {#if drawnCard}
             <div class="pile">
               <span>จั่วได้</span>
               <div class="card-item drawn">{drawnCard.display}</div>
             </div>
+          {:else if isMyTurn}
+            <!-- ปุ่มข้ามจะปรากฏเมื่อถึงตาเรา และยังไม่ได้จั่วไพ่ -->
+            <div class="pile pass-area">
+              <span>ไม่จั่ว</span>
+              <button class="btn pass-btn" onclick={passTurn} disabled={isLoading}>⏭️ ข้าม</button>
+            </div>
           {/if}
+
           <div class="pile">
             <span>กองทิ้ง</span>
             <button class="card-item discard" onclick={() => draw(false)} disabled={!isMyTurn || drawnCard}>
@@ -206,6 +230,9 @@
   .drawn { border-color: #fbbf24; color: #fbbf24; box-shadow: 0 0 15px rgba(251, 191, 36, 0.3); }
   .discard { background: #f8fafc; color: #0f172a; }
 
+  .pass-btn { height: 95px; width: 65px; background: #475569; color: white; border-radius: 10px; border: 1px dashed #94a3b8; font-size: 0.9rem; }
+  .pass-btn:hover { background: #334155; }
+
   .players-area { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 20px; }
   .player-slot { text-align: center; border-width: 2px; }
   .active-turn { border-color: #fbbf24; background: rgba(251, 191, 36, 0.05); }
@@ -217,6 +244,7 @@
   .can-swap { border: 2px dashed #fbbf24; animation: pulse 1s infinite; cursor: pointer; }
 
   .btn { padding: 10px 20px; border-radius: 10px; border: none; font-weight: bold; cursor: pointer; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .btn.join { width: 100%; background: #10b981; color: white; margin-top: 15px; }
   .btn.start { background: #fbbf24; color: #000; }
   .btn.leave { background: #475569; color: white; }
