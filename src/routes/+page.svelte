@@ -4,19 +4,19 @@
 
   // --- States ---
   let playerName = $state("");
-  let roomId = $state("31-ROOM");
+  let roomId = $state("31-ROOM-01");
   let isJoined = $state(false);
   let players = $state([]);
   let gameState = $state(null);
   let drawnCard = $state(null); 
   let isLoading = $state(false);
 
-  // --- Derived States ---
+  // --- Derived States (ระบบคำนวณอัตโนมัติ) ---
   let me = $derived(players.find(p => p.name === playerName));
   let isHost = $derived(players.length > 0 && players[0].name === playerName);
   let isMyTurn = $derived(gameState && me && gameState.current_turn_id === me.id);
 
-  // คำนวณแต้ม 31 (รวมเฉพาะดอกเดียวกันที่สูงที่สุด)
+  // คำนวณแต้มเกม 31 (รวมเฉพาะดอกเดียวกันที่สูงที่สุด)
   let myScore = $derived.by(() => {
     if (!me || !me.hand || me.hand.length === 0) return 0;
     const scores = { '♠': 0, '♥': 0, '♦': 0, '♣': 0 };
@@ -24,6 +24,7 @@
     return Math.max(...Object.values(scores));
   });
 
+  // --- Functions ---
   async function fetchAll() {
     const { data: pData } = await supabase.from('players').select('*').eq('room_id', roomId).order('created_at', { ascending: true });
     players = pData || [];
@@ -41,11 +42,18 @@
   }
 
   async function joinGame() {
-    if (!playerName.trim()) return;
+    if (!playerName.trim()) return alert("กรุณาใส่ชื่อ");
     isLoading = true;
-    const { error } = await supabase.from('players').insert([{ name: playerName, room_id: roomId }]);
+    const { error } = await supabase.from('players').insert([{ name: playerName, room_id: roomId, hand: [] }]);
     if (!error) { isJoined = true; fetchAll(); }
     isLoading = false;
+  }
+
+  async function leaveGame() {
+    await supabase.from('players').delete().eq('name', playerName).eq('room_id', roomId);
+    isJoined = false;
+    players = [];
+    drawnCard = null;
   }
 
   async function startGame() {
@@ -57,6 +65,7 @@
     await supabase.from('game_rooms').upsert({
       room_id: roomId, draw_pile: deck, discard_pile: [deck.shift()], current_turn_id: players[0].id, is_started: true
     });
+    drawnCard = null;
   }
 
   async function draw(fromDeck = true) {
@@ -83,6 +92,7 @@
   }
 
   onMount(() => {
+    fetchAll();
     const channel = supabase.channel(`room-${roomId}`)
       .on('postgres_changes', { event: '*', schema: 'public' }, fetchAll)
       .subscribe();
@@ -94,26 +104,41 @@
   {#if !isJoined}
     <div class="card login-box">
       <h1>🃏 31 ONLINE</h1>
-      <input bind:value={playerName} placeholder="ชื่อเล่น" />
-      <input bind:value={roomId} placeholder="รหัสห้อง" />
-      <button class="btn join" onclick={joinGame}>เข้าห้อง</button>
+      <div class="input-group">
+        <label>ชื่อผู้เล่น</label>
+        <input bind:value={playerName} placeholder="ใส่ชื่อ..." />
+      </div>
+      <div class="input-group">
+        <label>รหัสห้อง</label>
+        <input bind:value={roomId} />
+      </div>
+      <button class="btn join" onclick={joinGame} disabled={isLoading}>เข้าเล่นเกม</button>
     </div>
   {:else}
     <div class="game-layout">
       <header class="card">
-        <div class="info">
+        <div class="room-info">
           <h2>ห้อง: <span class="highlight">{roomId}</span></h2>
-          <p class:active={isMyTurn}>{isMyTurn ? "🔥 ตาของคุณ!" : "รอเพื่อน..."}</p>
+          <p class="turn-status" class:active={isMyTurn}>
+            {#if gameState?.is_started}
+              {isMyTurn ? "🔥 ตาของคุณแล้ว!" : `รอตาของ ${players.find(p => p.id === gameState.current_turn_id)?.name || '...'}`}
+            {:else}
+              🕒 รอเริ่มเกม (ต้องมี 2 คนขึ้นไป)
+            {/if}
+          </p>
         </div>
-        {#if isHost && !gameState?.is_started}
-          <button class="btn start" onclick={startGame}>เริ่มเกม (แจก 3 ใบ)</button>
-        {/if}
+        <div class="header-actions">
+          <button class="btn leave" onclick={leaveGame}>ออกเกม</button>
+          {#if isHost && !gameState?.is_started}
+            <button class="btn start" onclick={startGame} disabled={players.length < 2}>แจกไพ่ 3 ใบ</button>
+          {/if}
+        </div>
       </header>
 
       {#if gameState?.is_started}
         <div class="board card">
           <div class="pile">
-            <span>กองจั่ว ({gameState.draw_pile.length})</span>
+            <span>กองจั่ว ({gameState.draw_pile?.length || 0})</span>
             <button class="card-item deck" onclick={() => draw(true)} disabled={!isMyTurn || drawnCard}>?</button>
           </div>
           {#if drawnCard}
@@ -131,13 +156,20 @@
         </div>
       {/if}
 
-      <div class="players-grid">
+      <div class="players-area">
         {#each players as p}
-          <div class="player-card card" class:active-turn={gameState?.current_turn_id === p.id} class:is-me={p.name === playerName}>
-            <div class="p-header">{p.name} {p.name === playerName ? `(แต้ม: ${myScore})` : ''}</div>
+          <div class="player-slot card" class:active-turn={gameState?.current_turn_id === p.id} class:me={p.name === playerName}>
+            <div class="p-header">
+              {p.name === players[0].name ? '👑' : '👤'} {p.name} {p.name === playerName ? `(คุณ - ${myScore} แต้ม)` : ''}
+            </div>
             <div class="hand">
               {#each (p.hand || [null, null, null]) as card, i}
-                <button class="card-item" class:mine={p.name === playerName} class:can-swap={drawnCard && p.name === playerName} onclick={() => swap(i)}>
+                <button 
+                  class="card-item player-card" 
+                  class:gold={p.name === playerName}
+                  class:can-swap={drawnCard && p.name === playerName}
+                  onclick={() => p.name === playerName && swap(i)}
+                >
                   {p.name === playerName ? (card?.display ?? '?') : '?'}
                 </button>
               {/each}
@@ -151,28 +183,44 @@
 
 <style>
   :global(body) { background: #020617; color: white; font-family: 'Kanit', sans-serif; margin: 0; }
-  .container { display: flex; justify-content: center; padding: 20px; }
-  .card { background: #1e293b; border-radius: 15px; border: 1px solid #334155; padding: 20px; }
-  .login-box { width: 300px; text-align: center; margin-top: 10vh; }
-  input { width: 100%; padding: 10px; margin-bottom: 10px; background: #0f172a; border: 1px solid #334155; color: white; border-radius: 8px; box-sizing: border-box; }
-  .game-layout { width: 100%; max-width: 800px; }
+  .container { display: flex; justify-content: center; min-height: 100vh; padding: 20px; box-sizing: border-box; }
+  .card { background: #1e293b; border-radius: 20px; border: 1px solid #334155; box-shadow: 0 10px 30px rgba(0,0,0,0.4); padding: 20px; }
+  
+  .login-box { width: 320px; text-align: center; height: fit-content; margin-top: 10vh; }
+  h1 { color: #fbbf24; margin-bottom: 2rem; letter-spacing: 2px; }
+  .input-group { text-align: left; margin-bottom: 1rem; }
+  label { font-size: 0.8rem; color: #94a3b8; margin-left: 5px; }
+  input { width: 100%; padding: 12px; background: #0f172a; border: 1px solid #334155; border-radius: 12px; color: white; box-sizing: border-box; }
+  
+  .game-layout { width: 100%; max-width: 900px; }
   header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
   .highlight { color: #38bdf8; }
-  .active { color: #fbbf24; font-weight: bold; }
-  .board { display: flex; justify-content: center; gap: 30px; margin-bottom: 20px; background: #111827; }
-  .pile { display: flex; flex-direction: column; align-items: center; font-size: 0.8rem; color: #94a3b8; }
-  .card-item { width: 60px; height: 90px; border-radius: 10px; border: 1px solid #334155; background: #0f172a; color: white; font-weight: bold; font-size: 1.2rem; cursor: pointer; display: flex; justify-content: center; align-items: center; }
-  .deck { background: #334155; }
-  .drawn { border-color: #fbbf24; color: #fbbf24; }
-  .discard { background: white; color: black; }
-  .players-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 20px; }
-  .player-card.active-turn { border-color: #fbbf24; }
-  .player-card.is-me { border-color: #10b981; }
-  .hand { display: flex; gap: 10px; justify-content: center; margin-top: 10px; }
-  .mine { border-color: #10b981; }
-  .can-swap { border: 2px dashed #fbbf24; animation: pulse 1s infinite; }
-  .btn { padding: 10px 20px; border-radius: 8px; border: none; font-weight: bold; cursor: pointer; }
-  .btn.join { width: 100%; background: #10b981; color: white; }
-  .btn.start { background: #fbbf24; }
+  .turn-status.active { color: #fbbf24; font-weight: bold; }
+  .header-actions { display: flex; gap: 10px; }
+
+  .board { display: flex; justify-content: center; gap: 40px; margin-bottom: 25px; background: #111827; }
+  .pile { display: flex; flex-direction: column; align-items: center; gap: 10px; font-size: 0.8rem; color: #94a3b8; }
+  
+  .card-item { width: 65px; height: 95px; border-radius: 10px; border: 1px solid #334155; display: flex; align-items: center; justify-content: center; font-size: 1.3rem; font-weight: bold; background: #0f172a; cursor: pointer; transition: 0.2s; }
+  .deck { background: #334155; color: white; }
+  .drawn { border-color: #fbbf24; color: #fbbf24; box-shadow: 0 0 15px rgba(251, 191, 36, 0.3); }
+  .discard { background: #f8fafc; color: #0f172a; }
+
+  .players-area { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 20px; }
+  .player-slot { text-align: center; border-width: 2px; }
+  .active-turn { border-color: #fbbf24; background: rgba(251, 191, 36, 0.05); }
+  .me { border-color: #10b981; }
+  .p-header { font-weight: bold; margin-bottom: 15px; }
+  .hand { display: flex; gap: 10px; justify-content: center; }
+  .player-card { cursor: default; }
+  .gold { border-color: #fbbf24; color: #fbbf24; }
+  .can-swap { border: 2px dashed #fbbf24; animation: pulse 1s infinite; cursor: pointer; }
+
+  .btn { padding: 10px 20px; border-radius: 10px; border: none; font-weight: bold; cursor: pointer; }
+  .btn.join { width: 100%; background: #10b981; color: white; margin-top: 15px; }
+  .btn.start { background: #fbbf24; color: #000; }
+  .btn.leave { background: #475569; color: white; }
+  .btn.leave:hover { background: #ef4444; }
+
   @keyframes pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.05); } }
 </style>
